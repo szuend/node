@@ -31,6 +31,8 @@
 # char arrays. It is used for embedded JavaScript code in the V8
 # library.
 
+import ast
+import json
 import os
 import re
 import sys
@@ -272,10 +274,10 @@ def JS2C(source, target):
     if name.endswith('.gypi'):
       # Currently only config.gypi is allowed
       assert name == 'config.gypi'
-      lines = re.sub(r'\'true\'', 'true', lines)
-      lines = re.sub(r'\'false\'', 'false', lines)
-      lines = re.sub(r'#.*?\n', '', lines)
-      lines = re.sub(r'\'', '"', lines)
+      obj = ast.literal_eval(lines)
+      lines = json.dumps(obj, indent=2)
+      lines = re.sub(r'\"true\"', 'true', lines)
+      lines = re.sub(r'\"false\"', 'false', lines)
       definition = GetDefinition('config_raw', lines)
       definitions.append(definition)
     else:
