@@ -589,16 +589,16 @@ parser.add_option('--build-v8-with-gn-extra-gn-args',
     dest='build_v8_with_gn_extra_gn_args',
     default='',
     help='Extra gn args to pass add to the "gn gen --args "..." invocation')
-parser.add_option('--use-clang-cl',
+parser.add_option('--use-clang',
     action='store_true',
-    dest='use_clang_cl',
+    dest='use_clang',
     default=False,
     help='On Windows, build using clang-cl. By default, uses the copy of '
          'clang-cl that is bundled with V8. Requires --ninja.')
-parser.add_option('--clang-cl-base-path',
-    dest='clang_cl_base_path',
+parser.add_option('--clang-base-path',
+    dest='clang_base_path',
     help='Absolute path to a directory containing a bin\\clang-cl.exe '
-         '(requires --use-clang-cl).')
+         '(requires --use-clang).')
 
 parser.add_option('--verbose',
     action='store_true',
@@ -640,11 +640,13 @@ def warn(msg):
 # track if warnings occurred
 warn.warned = False
 
-if options.use_clang_cl:
-  if not options.use_ninja:
-    warn('--use-clang-cl requires --ninja')
-  if options.clang_cl_base_path:
-    clang_base_path = options.clang_cl_base_path
+# Always use clang when building V8 with GN.
+if options.build_v8_with_gn:
+  options.use_clang = True
+
+if options.use_clang:
+  if options.clang_base_path:
+    clang_base_path = options.clang_base_path
   else:
     clang_base_path = os.path.abspath(os.path.join(
         'deps', 'v8', 'third_party', 'llvm-build', 'Release+Asserts'))
@@ -653,6 +655,8 @@ if options.use_clang_cl:
     options.build_v8_with_gn_extra_gn_args += ' '
   options.build_v8_with_gn_extra_gn_args += 'clang_base_path="{}"'.format(
       clang_base_path)
+  CC = os.path.join(clang_base_path, 'bin', 'clang')
+  CXX = os.path.join(clang_base_path, 'bin', 'clang++')
 
 def print_verbose(x):
   if not options.verbose:
@@ -1645,6 +1649,17 @@ output = {
   'cflags': [],
 }
 
+if options.use_clang:
+  make_global_settings = output.setdefault('make_global_settings', [])
+  make_global_settings.append(['CC', CC])
+  make_global_settings.append(['CXX', CXX])
+  make_global_settings.append(['CC.host', CC])
+  make_global_settings.append(['CXX.host', CXX])
+  make_global_settings.append(['CC.target', CC])
+  make_global_settings.append(['CXX.target', CXX])
+
+configure_v8(output)
+
 # Print a warning when the compiler is too old.
 check_compiler(output)
 
@@ -1664,7 +1679,6 @@ configure_library('nghttp2', output)
 # stay backwards compatible with shared cares builds
 output['variables']['node_shared_cares'] = \
     output['variables'].pop('node_shared_libcares')
-configure_v8(output)
 configure_openssl(output)
 configure_intl(output)
 configure_static(output)
@@ -1683,11 +1697,6 @@ if 'make_fips_settings' in output:
   del output['make_fips_settings']
   write('config_fips.gypi', do_not_edit +
         pprint.pformat(config_fips, indent=2) + '\n')
-
-if options.use_clang_cl:
-  make_global_settings = output.setdefault('make_global_settings', [])
-  make_global_settings.append(
-      ['CC', os.path.join(clang_base_path, 'bin', 'clang-cl')])
 
 # make_global_settings should be a root level element too
 if 'make_global_settings' in output:
