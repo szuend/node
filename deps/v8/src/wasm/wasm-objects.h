@@ -26,6 +26,7 @@ struct InterpretedFrameDeleter;
 class NativeModule;
 class SignatureMap;
 class WasmCode;
+struct WasmException;
 struct WasmFeatures;
 class WasmInterpreter;
 struct WasmModule;
@@ -36,8 +37,10 @@ class BreakPoint;
 class JSArrayBuffer;
 class SeqOneByteString;
 class WasmDebugInfo;
+class WasmExceptionTag;
 class WasmInstanceObject;
 class WasmModuleObject;
+class WasmExportedFunction;
 
 template <class CppType>
 class Managed;
@@ -50,9 +53,9 @@ class Managed;
 // The underlying storage in the instance is used by generated code to
 // call functions indirectly at runtime.
 // Each entry has the following fields:
-// - object = target instance, if a WASM function, tuple if imported
+// - object = target instance, if a Wasm function, tuple if imported
 // - sig_id = signature id of function
-// - target = entrypoint to WASM code or import wrapper code
+// - target = entrypoint to Wasm code or import wrapper code
 class IndirectFunctionTableEntry {
  public:
   inline IndirectFunctionTableEntry(Handle<WasmInstanceObject>, int index);
@@ -211,7 +214,7 @@ class WasmModuleObject : public JSObject {
   bool GetPositionInfo(uint32_t position, Script::PositionInfo* info);
 
   // Get the source position from a given function index and byte offset,
-  // for either asm.js or pure WASM modules.
+  // for either asm.js or pure Wasm modules.
   static int GetSourcePosition(Handle<WasmModuleObject>, uint32_t func_index,
                                uint32_t byte_offset,
                                bool is_at_number_conversion);
@@ -409,6 +412,7 @@ class WasmInstanceObject : public JSObject {
   DECL_ACCESSORS(undefined_value, Oddball)
   DECL_ACCESSORS(null_value, Oddball)
   DECL_ACCESSORS(centry_stub, Code)
+  DECL_OPTIONAL_ACCESSORS(wasm_exported_functions, FixedArray)
   DECL_PRIMITIVE_ACCESSORS(memory_start, byte*)
   DECL_PRIMITIVE_ACCESSORS(memory_size, size_t)
   DECL_PRIMITIVE_ACCESSORS(memory_mask, size_t)
@@ -452,6 +456,7 @@ class WasmInstanceObject : public JSObject {
   V(kUndefinedValueOffset, kTaggedSize)                                   \
   V(kNullValueOffset, kTaggedSize)                                        \
   V(kCEntryStubOffset, kTaggedSize)                                       \
+  V(kWasmExportedFunctionsOffset, kTaggedSize)                            \
   V(kEndOfTaggedFieldsOffset, 0)                                          \
   /* Raw data. */                                                         \
   V(kIndirectFunctionTableSizeOffset, kUInt32Size)                        \
@@ -507,8 +512,23 @@ class WasmInstanceObject : public JSObject {
                                uint32_t table_index, uint32_t dst, uint32_t src,
                                uint32_t count) V8_WARN_UNUSED_RESULT;
 
+  // Copy table entries from an element segment. Returns {false} if the ranges
+  // are out-of-bounds.
+  static bool InitTableEntries(Isolate* isolate,
+                               Handle<WasmInstanceObject> instance,
+                               uint32_t table_index, uint32_t segment_index,
+                               uint32_t dst, uint32_t src,
+                               uint32_t count) V8_WARN_UNUSED_RESULT;
+
   // Iterates all fields in the object except the untagged fields.
   class BodyDescriptor;
+
+  static MaybeHandle<WasmExportedFunction> GetWasmExportedFunction(
+      Isolate* isolate, Handle<WasmInstanceObject> instance, int index);
+  static void SetWasmExportedFunction(Isolate* isolate,
+                                      Handle<WasmInstanceObject> instance,
+                                      int index,
+                                      Handle<WasmExportedFunction> val);
 
   OBJECT_CONSTRUCTORS(WasmInstanceObject, JSObject)
 
@@ -548,7 +568,26 @@ class WasmExceptionObject : public JSObject {
   OBJECT_CONSTRUCTORS(WasmExceptionObject, JSObject)
 };
 
-// A WASM function that is wrapped and exported to JavaScript.
+// A Wasm exception that has been thrown out of Wasm code.
+class WasmExceptionPackage : public JSReceiver {
+ public:
+  // TODO(mstarzinger): Ideally this interface would use {WasmExceptionPackage}
+  // instead of {JSReceiver} throughout. For now a type-check implies doing a
+  // property lookup however, which would result in casts being handlified.
+  static Handle<JSReceiver> New(Isolate* isolate,
+                                Handle<WasmExceptionTag> exception_tag,
+                                int encoded_size);
+
+  // The below getters return {undefined} in case the given exception package
+  // does not carry the requested values (i.e. is of a different type).
+  static Handle<Object> GetExceptionTag(Isolate*, Handle<Object> exception);
+  static Handle<Object> GetExceptionValues(Isolate*, Handle<Object> exception);
+
+  // Determines the size of the array holding all encoded exception values.
+  static uint32_t GetEncodedSize(const wasm::WasmException* exception);
+};
+
+// A Wasm function that is wrapped and exported to JavaScript.
 class WasmExportedFunction : public JSFunction {
  public:
   WasmInstanceObject instance();

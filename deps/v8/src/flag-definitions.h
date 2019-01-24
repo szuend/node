@@ -204,9 +204,10 @@ DEFINE_IMPLICATION(harmony_private_methods, harmony_private_fields)
   V(harmony_weak_refs, "harmony weak references")                         \
 
 #ifdef V8_INTL_SUPPORT
-#define HARMONY_INPROGRESS(V) \
-  HARMONY_INPROGRESS_BASE(V)  \
-  V(harmony_locale, "Intl.Locale")
+#define HARMONY_INPROGRESS(V)      \
+  HARMONY_INPROGRESS_BASE(V)       \
+  V(harmony_locale, "Intl.Locale") \
+  V(harmony_intl_bigint, "BigInt.prototype.toLocaleString")
 #else
 #define HARMONY_INPROGRESS(V) HARMONY_INPROGRESS_BASE(V)
 #endif
@@ -1093,6 +1094,15 @@ DEFINE_UINT(serialization_chunk_size, 4096,
 DEFINE_BOOL(regexp_optimization, true, "generate optimized regexp code")
 DEFINE_BOOL(regexp_mode_modifiers, false, "enable inline flags in regexp.")
 
+#ifdef V8_INTERPRETED_REGEXP
+#define V8_INTERPRETED_REGEXP_BOOL true
+#else
+#define V8_INTERPRETED_REGEXP_BOOL false
+#endif
+DEFINE_BOOL(regexp_interpret_all, V8_INTERPRETED_REGEXP_BOOL,
+            "interpret all regexp code")
+#undef V8_INTERPRETED_REGEXP_BOOL
+
 // Testing flags test/cctest/test-{flags,api,serialization}.cc
 DEFINE_BOOL(testing_bool_flag, true, "testing_bool_flag")
 DEFINE_MAYBE_BOOL(testing_maybe_bool_flag, "testing_maybe_bool_flag")
@@ -1158,6 +1168,8 @@ DEFINE_BOOL(jitless, V8_LITE_BOOL,
 // Optimizations (i.e. jitting) are disabled.
 DEFINE_NEG_IMPLICATION(jitless, opt)
 #endif
+// Regexps are interpreted.
+DEFINE_IMPLICATION(jitless, regexp_interpret_all)
 // asm.js validation is disabled since it triggers wasm code generation.
 DEFINE_NEG_IMPLICATION(jitless, validate_asm)
 // Wasm is put into interpreter-only mode. We repeat flag implications down
@@ -1311,9 +1323,6 @@ DEFINE_BOOL(prof_browser_mode, true,
 DEFINE_STRING(logfile, "v8.log", "Specify the name of the log file.")
 DEFINE_BOOL(logfile_per_isolate, true, "Separate log files for each isolate.")
 DEFINE_BOOL(ll_prof, false, "Enable low-level linux profiler.")
-DEFINE_BOOL(interpreted_frames_native_stack, false,
-            "Show interpreted frames on the native stack (useful for external "
-            "profilers).")
 DEFINE_BOOL(perf_basic_prof, false,
             "Enable perf linux profiler (basic support).")
 DEFINE_NEG_IMPLICATION(perf_basic_prof, compact_code_space)
@@ -1350,6 +1359,18 @@ DEFINE_STRING(redirect_code_traces_to, nullptr,
 
 DEFINE_BOOL(print_opt_source, false,
             "print source code of optimized and inlined functions")
+
+#ifdef V8_TARGET_ARCH_ARM
+// Unsupported on arm. See https://crbug.com/v8/8713.
+DEFINE_BOOL_READONLY(
+    interpreted_frames_native_stack, false,
+    "Show interpreted frames on the native stack (useful for external "
+    "profilers).")
+#else
+DEFINE_BOOL(interpreted_frames_native_stack, false,
+            "Show interpreted frames on the native stack (useful for external "
+            "profilers).")
+#endif
 
 //
 // Disassembler only flags

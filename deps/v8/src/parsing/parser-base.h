@@ -480,16 +480,12 @@ class ParserBase {
 
   struct DeclarationParsingResult {
     struct Declaration {
-      Declaration(ExpressionT pattern, int initializer_position,
-                  ExpressionT initializer)
-          : pattern(pattern),
-            initializer_position(initializer_position),
-            initializer(initializer) {}
+      Declaration(ExpressionT pattern, ExpressionT initializer)
+          : pattern(pattern), initializer(initializer) {}
 
       ExpressionT pattern;
-      int initializer_position;
-      int value_beg_position = kNoSourcePosition;
       ExpressionT initializer;
+      int value_beg_pos = kNoSourcePosition;
     };
 
     DeclarationParsingResult()
@@ -1081,6 +1077,31 @@ class ParserBase {
                          FunctionKind kind,
                          FunctionLiteral::FunctionType function_type,
                          FunctionBodyType body_type);
+
+  // Check if the scope has conflicting var/let declarations from different
+  // scopes. This covers for example
+  //
+  // function f() { { { var x; } let x; } }
+  // function g() { { var x; let x; } }
+  //
+  // The var declarations are hoisted to the function scope, but originate from
+  // a scope where the name has also been let bound or the var declaration is
+  // hoisted over such a scope.
+  void CheckConflictingVarDeclarations(Scope* scope) {
+    if (has_error()) return;
+    Declaration* decl = scope->CheckConflictingVarDeclarations();
+    if (decl != nullptr) {
+      // In ES6, conflicting variable bindings are early errors.
+      const AstRawString* name = decl->var()->raw_name();
+      int position = decl->position();
+      Scanner::Location location =
+          position == kNoSourcePosition
+              ? Scanner::Location::invalid()
+              : Scanner::Location(position, position + 1);
+      impl()->ReportMessageAt(location, MessageTemplate::kVarRedeclaration,
+                              name);
+    }
+  }
 
   // TODO(nikolaos, marja): The first argument should not really be passed
   // by value. The method is expected to add the parsed statements to the
@@ -3363,6 +3384,7 @@ void ParserBase<Impl>::ParseFormalParameter(FormalParametersT* parameters) {
   //   BindingElement[?Yield, ?GeneratorParameter]
   FuncNameInferrerState fni_state(&fni_);
   int pos = peek_position();
+  auto declaration_it = scope()->declarations()->end();
   ExpressionT pattern = ParseBindingPattern();
   if (impl()->IsIdentifier(pattern)) {
     ClassifyParameter(impl()->AsIdentifier(pattern), pos, end_position());
@@ -3379,9 +3401,15 @@ void ParserBase<Impl>::ParseFormalParameter(FormalParametersT* parameters) {
       return;
     }
 
-    AcceptINScope scope(this, true);
+    AcceptINScope accept_in_scope(this, true);
     initializer = ParseAssignmentExpression();
     impl()->SetFunctionNameFromIdentifierRef(initializer, pattern);
+  }
+
+  auto declaration_end = scope()->declarations()->end();
+  int initializer_end = end_position();
+  for (; declaration_it != declaration_end; ++declaration_it) {
+    declaration_it->var()->set_initializer_position(initializer_end);
   }
 
   impl()->AddFormalParameter(parameters, pattern, initializer, end_position(),
@@ -3473,6 +3501,11 @@ void ParserBase<Impl>::ParseVariableDeclarations(
 
   VariableDeclarationParsingScope declaration(
       impl(), parsing_result->descriptor.mode, names);
+  Scope* target_scope = IsLexicalVariableMode(parsing_result->descriptor.mode)
+                            ? scope()
+                            : scope()->GetDeclarationScope();
+
+  auto declaration_it = target_scope->declarations()->end();
 
   int bindings_start = peek_position();
   do {
@@ -3485,12 +3518,10 @@ void ParserBase<Impl>::ParseVariableDeclarations(
     Scanner::Location variable_loc = scanner()->location();
 
     ExpressionT value = impl()->NullExpression();
-    int initializer_position = kNoSourcePosition;
-    int value_beg_position = kNoSourcePosition;
+    int value_beg_pos = kNoSourcePosition;
     if (Check(Token::ASSIGN)) {
-      value_beg_position = peek_position();
-
       {
+        value_beg_pos = peek_position();
         AcceptINScope scope(this, var_context != kForStatement);
         value = ParseAssignmentExpression();
       }
@@ -3510,9 +3541,6 @@ void ParserBase<Impl>::ParseVariableDeclarations(
       }
 
       impl()->SetFunctionNameFromIdentifierRef(value, pattern);
-
-      // End position of the initializer is after the assignment expression.
-      initializer_position = end_position();
     } else {
       if (var_context != kForStatement || !PeekInOrOf()) {
         // ES6 'const' and binding patterns require initializers.
@@ -3529,14 +3557,16 @@ void ParserBase<Impl>::ParseVariableDeclarations(
           value = factory()->NewUndefinedLiteral(position());
         }
       }
-
-      // End position of the initializer is after the variable.
-      initializer_position = position();
     }
 
-    typename DeclarationParsingResult::Declaration decl(
-        pattern, initializer_position, value);
-    decl.value_beg_position = value_beg_position;
+    int initializer_position = end_position();
+    auto declaration_end = target_scope->declarations()->end();
+    for (; declaration_it != declaration_end; ++declaration_it) {
+      declaration_it->var()->set_initializer_position(initializer_position);
+    }
+
+    typename DeclarationParsingResult::Declaration decl(pattern, value);
+    decl.value_beg_pos = value_beg_pos;
     parsing_result->declarations.push_back(decl);
   } while (Check(Token::COMMA));
 
@@ -3795,6 +3825,8 @@ void ParserBase<Impl>::ParseFunctionBody(
 
   bool allow_duplicate_parameters = false;
 
+  CheckConflictingVarDeclarations(inner_scope);
+
   if (V8_LIKELY(parameters.is_simple)) {
     DCHECK_EQ(inner_scope, function_scope);
     if (is_sloppy(function_scope->language_mode())) {
@@ -3823,7 +3855,6 @@ void ParserBase<Impl>::ParseFunctionBody(
       if (conflict != nullptr) {
         impl()->ReportVarRedeclarationIn(conflict, inner_scope);
       }
-      impl()->CheckConflictingVarDeclarations(inner_scope);
       impl()->InsertShadowingVarBindingInitializers(inner_block);
     }
   }
@@ -5179,9 +5210,20 @@ typename ParserBase<Impl>::StatementT ParserBase<Impl>::ParseTryStatement() {
             } else {
               catch_info.variable = catch_info.scope->DeclareCatchVariableName(
                   ast_value_factory()->dot_catch_string());
+
+              auto declaration_it = scope()->declarations()->end();
+
               VariableDeclarationParsingScope destructuring(
                   impl(), VariableMode::kLet, nullptr);
               catch_info.pattern = ParseBindingPattern();
+
+              int initializer_position = end_position();
+              auto declaration_end = scope()->declarations()->end();
+              for (; declaration_it != declaration_end; ++declaration_it) {
+                declaration_it->var()->set_initializer_position(
+                    initializer_position);
+              }
+
               RETURN_IF_PARSE_ERROR;
               catch_statements.Add(impl()->RewriteCatchPattern(&catch_info));
             }

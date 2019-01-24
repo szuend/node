@@ -865,6 +865,7 @@ torque_files = [
   "src/builtins/array-join.tq",
   "src/builtins/array-lastindexof.tq",
   "src/builtins/array-of.tq",
+  "src/builtins/array-map.tq",
   "src/builtins/array-reverse.tq",
   "src/builtins/array-slice.tq",
   "src/builtins/array-splice.tq",
@@ -872,7 +873,6 @@ torque_files = [
   "src/builtins/collections.tq",
   "src/builtins/data-view.tq",
   "src/builtins/extras-utils.tq",
-  "src/builtins/object.tq",
   "src/builtins/object-fromentries.tq",
   "src/builtins/iterator.tq",
   "src/builtins/typed-array.tq",
@@ -2326,7 +2326,6 @@ v8_source_set("v8_base") {
     "src/parsing/parser.h",
     "src/parsing/parsing.cc",
     "src/parsing/parsing.h",
-    "src/parsing/pattern-rewriter.cc",
     "src/parsing/preparse-data-impl.h",
     "src/parsing/preparse-data.cc",
     "src/parsing/preparse-data.h",
@@ -3050,6 +3049,9 @@ v8_source_set("torque_base") {
   ]
 
   configs = [ ":internal_config" ]
+  if (is_win && is_asan) {
+    remove_configs = [ "//build/config/sanitizers:default_sanitizer_flags" ]
+  }
 }
 
 v8_component("v8_libbase") {
@@ -3413,6 +3415,9 @@ if (current_toolchain == v8_snapshot_toolchain) {
     ]
 
     configs = [ ":internal_config" ]
+    if (is_win && is_asan) {
+      remove_configs = [ "//build/config/sanitizers:default_sanitizer_flags" ]
+    }
   }
 }
 

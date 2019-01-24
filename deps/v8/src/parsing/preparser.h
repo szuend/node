@@ -943,7 +943,10 @@ class PreParser : public ParserBase<PreParser> {
                               runtime_call_stats, logger, script_id,
                               parsing_module, parsing_on_main_thread),
         use_counts_(nullptr),
-        preparse_data_builder_(nullptr) {}
+        preparse_data_builder_(nullptr),
+        preparse_data_builder_buffer_() {
+    preparse_data_builder_buffer_.reserve(16);
+  }
 
   static bool IsPreParser() { return true; }
 
@@ -975,6 +978,10 @@ class PreParser : public ParserBase<PreParser> {
 
   void set_preparse_data_builder(PreparseDataBuilder* preparse_data_builder) {
     preparse_data_builder_ = preparse_data_builder;
+  }
+
+  std::vector<void*>* preparse_data_builder_buffer() {
+    return &preparse_data_builder_buffer_;
   }
 
  private:
@@ -1040,8 +1047,6 @@ class PreParser : public ParserBase<PreParser> {
       const PreParserExpression& expression) {
     return expression.IsPropertyWithPrivateFieldKey();
   }
-  V8_INLINE void CheckConflictingVarDeclarations(Scope* scope) {}
-
   V8_INLINE void SetLanguageMode(Scope* scope, LanguageMode mode) {
     scope->SetLanguageMode(mode);
   }
@@ -1085,14 +1090,27 @@ class PreParser : public ParserBase<PreParser> {
   void DeclareVariable(VariableProxy* proxy, VariableKind kind,
                        VariableMode mode, InitializationFlag init, Scope* scope,
                        bool* was_added, int position) {
-    DeclareVariableName(proxy->raw_name(), mode, scope, was_added, kind);
+    DeclareVariableName(proxy->raw_name(), mode, scope, was_added, position,
+                        kind);
   }
 
   void DeclareVariableName(const AstRawString* name, VariableMode mode,
                            Scope* scope, bool* was_added,
+                           int position = kNoSourcePosition,
                            VariableKind kind = NORMAL_VARIABLE) {
-    if (scope->DeclareVariableName(name, mode, was_added, kind) == nullptr) {
+    Variable* var = scope->DeclareVariableName(name, mode, was_added, kind);
+    if (var == nullptr) {
       ReportUnidentifiableError();
+      return;
+    }
+    if (var->scope() != scope) {
+      DCHECK_NE(kNoSourcePosition, position);
+      DCHECK_EQ(VariableMode::kVar, mode);
+      Declaration* nested_declaration =
+          factory()->ast_node_factory()->NewNestedVariableDeclaration(scope,
+                                                                      position);
+      nested_declaration->set_var(var);
+      var->scope()->declarations()->Add(nested_declaration);
     }
   }
 
@@ -1640,6 +1658,7 @@ class PreParser : public ParserBase<PreParser> {
   PreParserLogger log_;
 
   PreparseDataBuilder* preparse_data_builder_;
+  std::vector<void*> preparse_data_builder_buffer_;
 };
 
 PreParserExpression PreParser::SpreadCall(const PreParserExpression& function,

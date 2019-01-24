@@ -319,10 +319,6 @@ bool Scope::HasSimpleParameters() {
   return !scope->is_function_scope() || scope->has_simple_parameters();
 }
 
-bool DeclarationScope::ShouldEagerCompile() const {
-  return force_eager_compilation_ || should_eager_compile_;
-}
-
 void DeclarationScope::set_should_eager_compile() {
   should_eager_compile_ = !was_lazily_parsed_;
 }
@@ -1143,6 +1139,16 @@ Variable* Scope::NewTemporary(const AstRawString* name,
 }
 
 Declaration* Scope::CheckConflictingVarDeclarations() {
+  bool is_sloppy_eval = is_eval_scope() && is_sloppy(language_mode());
+  // In case of a regular function/script, check all scopes except for the scope
+  // in which the var ends up being declared.
+  Scope* end = this;
+  // In the case of eval, check all scopes up to and including the next
+  // declaration scope.
+  if (is_sloppy_eval) {
+    while (end->is_eval_scope()) end = end->outer_scope_->GetDeclarationScope();
+    end = end->outer_scope_;
+  }
   for (Declaration* decl : decls_) {
     // Lexical vs lexical conflicts within the same scope have already been
     // captured in Parser::Declare. The only conflicts we still need to check
@@ -1151,7 +1157,7 @@ Declaration* Scope::CheckConflictingVarDeclarations() {
     if (decl->IsVariableDeclaration() &&
         decl->AsVariableDeclaration()->AsNested() != nullptr) {
       current = decl->AsVariableDeclaration()->AsNested()->scope();
-    } else if (is_eval_scope() && is_sloppy(language_mode())) {
+    } else if (is_sloppy_eval) {
       if (IsLexicalVariableMode(decl->var()->mode())) continue;
       current = outer_scope_;
     }
@@ -1159,19 +1165,15 @@ Declaration* Scope::CheckConflictingVarDeclarations() {
     DCHECK(decl->var()->mode() == VariableMode::kVar ||
            decl->var()->mode() == VariableMode::kDynamic);
     // Iterate through all scopes until and including the declaration scope.
-    while (true) {
+    do {
       // There is a conflict if there exists a non-VAR binding.
       Variable* other_var =
           current->LookupInScopeOrScopeInfo(decl->var()->raw_name());
       if (other_var != nullptr && IsLexicalVariableMode(other_var->mode())) {
         return decl;
       }
-      if (current->is_declaration_scope() &&
-          !(current->is_eval_scope() && is_sloppy(current->language_mode()))) {
-        break;
-      }
       current = current->outer_scope();
-    }
+    } while (current != end);
   }
   return nullptr;
 }
@@ -1197,7 +1199,9 @@ bool DeclarationScope::AllocateVariables(ParseInfo* info) {
     DCHECK(info->pending_error_handler()->has_pending_error());
     return false;
   }
-  AllocateVariablesRecursively();
+
+  // // Don't allocate variables of preparsed scopes.
+  if (!was_lazily_parsed()) AllocateVariablesRecursively();
 
   return true;
 }
@@ -1310,6 +1314,13 @@ Scope* Scope::GetOuterScopeWithContext() {
   return scope;
 }
 
+namespace {
+bool WasLazilyParsed(Scope* scope) {
+  return scope->is_declaration_scope() &&
+         scope->AsDeclarationScope()->was_lazily_parsed();
+}
+}  // namespace
+
 void Scope::CollectNonLocals(DeclarationScope* max_outer_scope,
                              Isolate* isolate, ParseInfo* info,
                              Handle<StringSet>* non_locals) {
@@ -1320,10 +1331,7 @@ void Scope::CollectNonLocals(DeclarationScope* max_outer_scope,
   // Lazy parsed declaration scopes are already partially analyzed. If there are
   // unresolved references remaining, they just need to be resolved in outer
   // scopes.
-  Scope* lookup =
-      is_declaration_scope() && AsDeclarationScope()->was_lazily_parsed()
-          ? outer_scope()
-          : this;
+  Scope* lookup = WasLazilyParsed(this) ? outer_scope() : this;
 
   for (VariableProxy* proxy : unresolved_list_) {
     DCHECK(!proxy->is_resolved());
@@ -1428,8 +1436,20 @@ void DeclarationScope::ResetAfterPreparsing(AstValueFactory* ast_value_factory,
   was_lazily_parsed_ = !aborted;
 }
 
+bool Scope::IsSkippableFunctionScope() {
+  // Lazy non-arrow function scopes are skippable. Lazy functions are exactly
+  // those Scopes which have their own PreparseDataBuilder object. This
+  // logic ensures that the scope allocation data is consistent with the
+  // skippable function data (both agree on where the lazy function boundaries
+  // are).
+  if (!is_function_scope()) return false;
+  DeclarationScope* declaration_scope = AsDeclarationScope();
+  return !declaration_scope->is_arrow_scope() &&
+         declaration_scope->preparse_data_builder() != nullptr;
+}
+
 void Scope::SavePreparseData(Parser* parser) {
-  if (PreparseDataBuilder::ScopeIsSkippableFunctionScope(this)) {
+  if (IsSkippableFunctionScope()) {
     AsDeclarationScope()->SavePreparseDataForDeclarationScope(parser);
   }
 
@@ -1698,8 +1718,7 @@ void Scope::CheckScopePositions() {
 void Scope::CheckZones() {
   DCHECK(!needs_migration_);
   for (Scope* scope = inner_scope_; scope != nullptr; scope = scope->sibling_) {
-    if (scope->is_declaration_scope() &&
-        scope->AsDeclarationScope()->was_lazily_parsed()) {
+    if (WasLazilyParsed(scope)) {
       DCHECK_NULL(scope->zone());
       DCHECK_NULL(scope->inner_scope_);
       continue;
@@ -1999,7 +2018,7 @@ bool Scope::ResolveVariablesRecursively(ParseInfo* info) {
   // Lazy parsed declaration scopes are already partially analyzed. If there are
   // unresolved references remaining, they just need to be resolved in outer
   // scopes.
-  if (is_declaration_scope() && AsDeclarationScope()->was_lazily_parsed()) {
+  if (WasLazilyParsed(this)) {
     DCHECK_EQ(variables_.occupancy(), 0);
     for (VariableProxy* proxy : unresolved_list_) {
       Variable* var = Lookup<kParsedScope>(proxy, outer_scope(), nullptr);
@@ -2118,18 +2137,15 @@ void DeclarationScope::AllocateParameterLocals() {
 }
 
 void DeclarationScope::AllocateParameter(Variable* var, int index) {
-  if (MustAllocate(var)) {
-    if (has_forced_context_allocation_for_parameters() ||
-        MustAllocateInContext(var)) {
-      DCHECK(var->IsUnallocated() || var->IsContextSlot());
-      if (var->IsUnallocated()) {
-        AllocateHeapSlot(var);
-      }
-    } else {
-      DCHECK(var->IsUnallocated() || var->IsParameter());
-      if (var->IsUnallocated()) {
-        var->AllocateTo(VariableLocation::PARAMETER, index);
-      }
+  if (!MustAllocate(var)) return;
+  if (has_forced_context_allocation_for_parameters() ||
+      MustAllocateInContext(var)) {
+    DCHECK(var->IsUnallocated() || var->IsContextSlot());
+    if (var->IsUnallocated()) AllocateHeapSlot(var);
+  } else {
+    DCHECK(var->IsUnallocated() || var->IsParameter());
+    if (var->IsUnallocated()) {
+      var->AllocateTo(VariableLocation::PARAMETER, index);
     }
   }
 }
@@ -2202,14 +2218,11 @@ void ModuleScope::AllocateModuleVariables() {
 
 void Scope::AllocateVariablesRecursively() {
   DCHECK(!already_resolved_);
-
-  // Don't allocate variables of preparsed scopes.
-  if (is_declaration_scope() && AsDeclarationScope()->was_lazily_parsed()) {
-    return;
-  }
+  DCHECK(!WasLazilyParsed(this));
 
   // Allocate variables for inner scopes.
   for (Scope* scope = inner_scope_; scope != nullptr; scope = scope->sibling_) {
+    if (WasLazilyParsed(scope)) continue;
     scope->AllocateVariablesRecursively();
   }
 
@@ -2219,9 +2232,7 @@ void Scope::AllocateVariablesRecursively() {
   // Allocate variables for this scope.
   // Parameters must be allocated first, if any.
   if (is_declaration_scope()) {
-    if (is_function_scope()) {
-      AsDeclarationScope()->AllocateParameterLocals();
-    }
+    if (is_function_scope()) AsDeclarationScope()->AllocateParameterLocals();
     AsDeclarationScope()->AllocateReceiver();
   }
   AllocateNonParameterLocalsAndDeclaredGlobals();
