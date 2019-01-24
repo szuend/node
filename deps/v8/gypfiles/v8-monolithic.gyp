@@ -62,6 +62,7 @@
             '--flag', 'v8_enable_disassembler=<(v8_enable_disassembler)',
             '--flag', 'v8_postmortem_support=<(v8_postmortem_support)',
             '--flag', 'v8_untrusted_code_mitigations=<(v8_untrusted_code_mitigations)',
+            '--extra-gn-args', 'use_sysroot=true',
             '--bundled-win-toolchain', '<(build_v8_with_gn_bundled_win_toolchain)',
             '--depot-tools', '<(build_v8_with_gn_depot_tools)',
           ],

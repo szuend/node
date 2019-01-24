@@ -599,6 +599,9 @@ parser.add_option('--clang-base-path',
     dest='clang_base_path',
     help='Absolute path to a directory containing a bin\\clang-cl.exe '
          '(requires --use-clang).')
+parser.add_option('--sysroot',
+    dest='sysroot',
+    help='Provide sysroot to the toolchain')
 
 parser.add_option('--verbose',
     action='store_true',
@@ -640,9 +643,12 @@ def warn(msg):
 # track if warnings occurred
 warn.warned = False
 
-# Always use clang when building V8 with GN.
+# Always use clang when building V8 with GN, with fixed sysroot.
 if options.build_v8_with_gn:
   options.use_clang = True
+  if not options.sysroot:
+    options.sysroot = os.path.abspath(os.path.join(
+        'deps', 'v8', 'build', 'linux', 'debian_sid_amd64-sysroot'))
 
 if options.use_clang:
   if options.clang_base_path:
@@ -1657,6 +1663,9 @@ if options.use_clang:
   make_global_settings.append(['CXX.host', CXX])
   make_global_settings.append(['CC.target', CC])
   make_global_settings.append(['CXX.target', CXX])
+
+if options.sysroot:
+  output['cflags'] += [ "--sysroot=%s" % options.sysroot ]
 
 configure_v8(output)
 
